@@ -52,7 +52,7 @@ type (
 	loginSuccessMsg   struct{}
 	resetSuccessMsg   struct{}
 	disconnectMsg     struct{}
-	autoLoginMsg      struct{ username, password, serverURL string }
+	autoLoginMsg      struct{ username, password, serverURL, sessionCookie string; useSession bool }
 	notifMsg          string
 	serverResponseMsg string
 	errorMsg          struct{ error }
@@ -64,9 +64,10 @@ type (
 		ID      int    `json:"id"`
 	}
 	credentials struct {
-		Username  string `json:"username"`	
-		Password  string `json:"password"`
-		ServerURL string `json:"server_url"`
+		Username      string `json:"username"`	
+		Password      string `json:"password"`
+		ServerURL     string `json:"server_url"`
+		SessionCookie string `json:"session_cookie"`
 	}
 )
 
@@ -194,7 +195,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.passwordInput.SetValue(msg.password)
 			m.serverInput.SetValue(msg.serverURL)
 			m.serverURL = msg.serverURL
-			return m, login(m)
+			
+			if msg.useSession && msg.sessionCookie != "" {
+				// Use session cookie for authentication
+				return m, sessionLogin(m, msg.sessionCookie)
+			} else {
+				// Use username/password for authentication
+				return m, login(m)
+			}
 		}
 
 	case loginSuccessMsg:
@@ -367,7 +375,7 @@ func getAuthFilePath() (string, error) {
 	return filepath.Join(usr, ".tom", "auth"), nil
 }
 
-func saveCredentials(username, password, serverURL string) error {
+func saveCredentials(username, password, serverURL, sessionCookie string) error {
 	authPath, err := getAuthFilePath()
 	if err != nil {
 		return err
@@ -378,9 +386,10 @@ func saveCredentials(username, password, serverURL string) error {
 	}
 
 	creds := credentials{
-		Username:  username,
-		Password:  password,
-		ServerURL: serverURL,
+		Username:      username,
+		Password:      password,
+		ServerURL:     serverURL,
+		SessionCookie: sessionCookie,
 	}
 
 	data, err := json.Marshal(creds)
@@ -393,28 +402,28 @@ func saveCredentials(username, password, serverURL string) error {
 	return os.WriteFile(authPath, []byte(encodedData), 0600)
 }
 
-func loadCredentials() (string, string, string, error) {
+func loadCredentials() (string, string, string, string, error) {
 	authPath, err := getAuthFilePath()
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 
 	encodedData, err := os.ReadFile(authPath)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 
 	decodedData, err := base64.StdEncoding.DecodeString(string(encodedData))
 	if err != nil {
-		return "", "", "", err	
+		return "", "", "", "", err	
 	}
 
 	var creds credentials
 	if err := json.Unmarshal(decodedData, &creds); err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 
-	return creds.Username, creds.Password, creds.ServerURL, nil
+	return creds.Username, creds.Password, creds.ServerURL, creds.SessionCookie, nil
 }
 
 func deleteCredentials() error {
@@ -425,12 +434,47 @@ func deleteCredentials() error {
 	return os.Remove(authPath)
 }
 
+func validateSessionCookie(serverURL, sessionCookie string, client *http.Client) bool {
+	if sessionCookie == "" {
+		return false
+	}
+	
+	// Create a test request to verify the session cookie
+	req, err := http.NewRequest("GET", serverURL+"/tasks", nil)
+	if err != nil {
+		return false
+	}
+	
+	// Set the session cookie
+	req.Header.Set("Cookie", sessionCookie)
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	
+	// If we get a 200 response, the session is valid
+	return resp.StatusCode == http.StatusOK
+}
+
 func checkAuth() tea.Msg {
-	username, password, serverURL, err := loadCredentials()
+	username, password, serverURL, sessionCookie, err := loadCredentials()
 	if err != nil {
 		return autoLoginMsg{} // No credentials, stay on login view
 	}
-	return autoLoginMsg{username, password, serverURL}
+	
+	// Create a temporary client to test the session cookie
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	
+	// First, try to use the session cookie if it exists
+	if sessionCookie != "" && validateSessionCookie(serverURL, sessionCookie, client) {
+		return autoLoginMsg{username, password, serverURL, sessionCookie, true}
+	}
+	
+	// If session cookie is invalid or doesn't exist, use username/password
+	return autoLoginMsg{username, password, serverURL, sessionCookie, false}
 }
 
 func disconnect() tea.Msg {
@@ -438,6 +482,33 @@ func disconnect() tea.Msg {
 		return errorMsg{fmt.Errorf("failed to disconnect: %w", err)}
 	}
 	return disconnectMsg{}
+}
+
+func sessionLogin(m model, sessionCookie string) tea.Cmd {
+	return func() tea.Msg {
+		// Set the session cookie in the client
+		if sessionCookie != "" {
+			req, err := http.NewRequest("GET", m.serverURL+"/tasks", nil)
+			if err != nil {
+				return errorMsg{err}
+			}
+			req.Header.Set("Cookie", sessionCookie)
+			
+			// Test the session cookie
+			resp, err := m.client.Do(req)
+			if err != nil {
+				return errorMsg{err}
+			}
+			defer resp.Body.Close()
+			
+			if resp.StatusCode == http.StatusOK {
+				return loginSuccessMsg{}
+			}
+		}
+		
+		// If session cookie is invalid, fall back to username/password login
+		return login(m)()
+	}
 }
 
 func login(m model) tea.Cmd {
@@ -461,7 +532,16 @@ func login(m model) tea.Cmd {
 			return errorMsg{fmt.Errorf("login failed: %s (%s)", resp.Status, string(bodyBytes))}
 		}
 
-		if err := saveCredentials(m.usernameInput.Value(), m.passwordInput.Value(), serverURL); err != nil {
+		// Extract session cookie from response
+		sessionCookie := ""
+		for _, cookie := range resp.Cookies() {
+			if cookie.Name == "session_id" {
+				sessionCookie = cookie.String()
+				break
+			}
+		}
+
+		if err := saveCredentials(m.usernameInput.Value(), m.passwordInput.Value(), serverURL, sessionCookie); err != nil {
 			return errorMsg{fmt.Errorf("failed to save credentials: %w", err)}
 		}
 
