@@ -77,18 +77,21 @@ const (
 )
 
 type model struct {
-	currentView   int
-	usernameInput textinput.Model
-	passwordInput textinput.Model
-	serverInput   textinput.Model
-	viewport      viewport.Model
-	chatInput     textinput.Model
-	messages      []string
-	client        *http.Client
-	err           error
-	width, height int
-	mdRenderer    *glamour.TermRenderer
-	serverURL     string
+	currentView     int
+	usernameInput   textinput.Model
+	passwordInput   textinput.Model
+	serverInput     textinput.Model
+	viewport        viewport.Model
+	chatInput       textinput.Model
+	messages        []string
+	client          *http.Client
+	err             error
+	width, height   int
+	mdRenderer      *glamour.TermRenderer
+	serverURL       string
+	history         []string
+	historyIndex    int
+	currentInput    string
 }
 
 func initialModel() model {
@@ -117,6 +120,12 @@ func initialModel() model {
 		glamour.WithWordWrap(0),
 	)
 
+	// Load history
+	history, err := loadHistory()
+	if err != nil {
+		history = []string{}
+	}
+
 	return model{
 		currentView:   viewLogin,
 		usernameInput: username,
@@ -125,6 +134,8 @@ func initialModel() model {
 		chatInput:     chat,
 		client:        client,
 		mdRenderer:    mdRenderer,
+		history:       history,
+		historyIndex:  len(history),
 	}
 }
 
@@ -165,6 +176,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				userInput := m.chatInput.Value()
 				m.chatInput.Reset()
+				
+				// Reset history navigation
+				m.historyIndex = len(m.history)
+				m.currentInput = ""
 
 				if strings.HasPrefix(userInput, "/") {
 					return m.handleCommand(userInput)
@@ -174,6 +189,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.SetContent(m.renderMessages())
 				m.viewport.GotoBottom()
 				return m, sendMessage(m, userInput)
+			}
+		case tea.KeyUp:
+			if m.currentView == viewChat && m.chatInput.Focused() {
+				if m.historyIndex > 0 {
+					// Save current input if we're at the end of history
+					if m.historyIndex == len(m.history) {
+						m.currentInput = m.chatInput.Value()
+					}
+					m.historyIndex--
+					m.chatInput.SetValue(m.history[m.historyIndex])
+					m.chatInput.CursorEnd()
+				}
+				return m, nil
+			}
+		case tea.KeyDown:
+			if m.currentView == viewChat && m.chatInput.Focused() {
+				if m.historyIndex < len(m.history) {
+					m.historyIndex++
+					if m.historyIndex == len(m.history) {
+						// Restore current input
+						m.chatInput.SetValue(m.currentInput)
+					} else {
+						m.chatInput.SetValue(m.history[m.historyIndex])
+					}
+					m.chatInput.CursorEnd()
+				}
+				return m, nil
 			}
 		case tea.KeyTab:
 			if m.currentView == viewLogin {
@@ -232,6 +274,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, "Tom: "+string(msg))
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
+		
+		// Reload history to update in-memory history
+		if history, err := loadHistory(); err == nil {
+			m.history = history
+			m.historyIndex = len(m.history)
+		}
+		
 		return m, nil
 
 	case resetSuccessMsg:
@@ -373,6 +422,75 @@ func getAuthFilePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(usr, ".tom", "auth"), nil
+}
+
+func getHistoryFilePath() (string, error) {
+	usr, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(usr, ".tom", "history"), nil
+}
+
+func saveHistory(prompt string) error {
+	historyPath, err := getHistoryFilePath()
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(historyPath), 0700); err != nil {
+		return err
+	}
+
+	// Read existing history
+	history, err := loadHistory()
+	if err != nil {
+		history = []string{}
+	}
+
+	// Add new prompt to history (avoid duplicates)
+	if len(history) == 0 || history[len(history)-1] != prompt {
+		history = append(history, prompt)
+	}
+
+	// Keep only last 1000 commands
+	if len(history) > 1000 {
+		history = history[len(history)-1000:]
+	}
+
+	// Write history back to file
+	data := strings.Join(history, "\n")
+	return os.WriteFile(historyPath, []byte(data), 0600)
+}
+
+func loadHistory() ([]string, error) {
+	historyPath, err := getHistoryFilePath()
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(historyPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	if len(data) == 0 {
+		return []string{}, nil
+	}
+
+	history := strings.Split(string(data), "\n")
+	// Remove empty lines
+	var cleanHistory []string
+	for _, line := range history {
+		if strings.TrimSpace(line) != "" {
+			cleanHistory = append(cleanHistory, line)
+		}
+	}
+
+	return cleanHistory, nil
 }
 
 func saveCredentials(username, password, serverURL, sessionCookie string) error {
@@ -551,6 +669,13 @@ func login(m model) tea.Cmd {
 
 func sendMessage(m model, userInput string) tea.Cmd {
 	return func() tea.Msg {
+		// Save to history
+		if userInput != "" {
+			if err := saveHistory(userInput); err != nil {
+				log.Printf("Failed to save history: %v", err)
+			}
+		}
+
 		postBody, _ := json.Marshal(map[string]interface{}{
 			"request":     userInput,
 			"lang":        "fr",
