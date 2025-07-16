@@ -259,7 +259,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.YPosition = headerHeight
 		m.messages = []string{"Tom: Welcome! Type /help for a list of commands."}
 		m.viewport.SetContent(m.renderMessages())
-		return m, textinput.Blink
+		return m, tea.Batch(textinput.Blink, resetCmd(m))
 
 	case disconnectMsg:
 		m.currentView = viewLogin
