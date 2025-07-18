@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -96,7 +97,10 @@ type model struct {
 
 func initialModel() model {
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar}
+	client := &http.Client{
+		Jar:     jar,
+		Timeout: 5 * time.Minute,
+	}
 
 	username := textinput.New()
 	username.Placeholder = "Username"
@@ -584,7 +588,10 @@ func checkAuth() tea.Msg {
 	
 	// Create a temporary client to test the session cookie
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar}
+	client := &http.Client{
+		Jar:     jar,
+		Timeout: 5 * time.Minute,
+	}
 	
 	// First, try to use the session cookie if it exists
 	if sessionCookie != "" && validateSessionCookie(serverURL, sessionCookie, client) {
