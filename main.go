@@ -702,11 +702,13 @@ func sendMessage(m model, userInput string) tea.Cmd {
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
+			body, _ := io.ReadAll(resp.Body)
+			errorText := fmt.Sprintf("Error %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			return serverResponseMsg(errorText)
+		}
+
 		if resp.StatusCode != http.StatusOK {
-			if resp.StatusCode == http.StatusInternalServerError {
-				log.Printf("Received 500 error, triggering reset.")
-				return resetCmd(m)() // Call resetCmd and return its message
-			}
 			return errorMsg{fmt.Errorf("failed to send message: %s", resp.Status)}
 		}
 
