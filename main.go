@@ -180,6 +180,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				userInput := m.chatInput.Value()
 				m.chatInput.Reset()
+
+				if strings.TrimSpace(userInput) == "" {
+					return m, nil
+				}
 				
 				// Reset history navigation
 				m.historyIndex = len(m.history)
