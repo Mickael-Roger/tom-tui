@@ -61,8 +61,12 @@ type (
 		Response string `json:"response"`
 	}
 	tasksResponse struct {
-		Message string `json:"message"`
-		ID      int    `json:"id"`
+		BackgroundTasks []notification `json:"background_tasks"`
+		ID              int            `json:"id"`
+	}
+	notification struct {
+		Module string `json:"module"`
+		Status string `json:"status"`
 	}
 	credentials struct {
 		Username      string `json:"username"`	
@@ -298,9 +302,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case notifMsg:
 		if string(msg) == "" {
-			m.messages = append(m.messages, "System: No new notifications.")
+			m.messages = append(m.messages, "Tom: No new notifications.")
 		} else {
-			m.messages = append(m.messages, "Notification: "+string(msg))
+			m.messages = append(m.messages, "Tom: # Notifications\n"+string(msg))
 		}
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
@@ -786,12 +790,17 @@ func fetchNotifsCmd(m model) tea.Cmd {
 			return errorMsg{err}
 		}
 
-		var taskData tasksResponse
-		if err := json.Unmarshal(body, &taskData); err != nil {
-			return errorMsg{err}
-		}
+		var tasksData tasksResponse
+        if err := json.Unmarshal(body, &tasksData); err != nil {
+            return errorMsg{err}
+        }
 
-		return notifMsg(taskData.Message)
+        var notifs []string
+        for _, task := range tasksData.BackgroundTasks {
+            notifs = append(notifs, fmt.Sprintf("- **%s**: %s", task.Module, task.Status))
+        }
+
+        return notifMsg(strings.Join(notifs, "\n"))
 	}
 }
 
