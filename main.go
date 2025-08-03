@@ -17,11 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // Styles
@@ -76,13 +77,17 @@ type (
 	}
 )
 
+
+
 const (
-	viewLogin = iota
+	viewConnecting = iota
+	viewLogin
 	viewChat
 )
 
 type model struct {
 	currentView     int
+	spinner         spinner.Model
 	usernameInput   textinput.Model
 	passwordInput   textinput.Model
 	serverInput     textinput.Model
@@ -134,8 +139,13 @@ func initialModel() model {
 		history = []string{}
 	}
 
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
 	return model{
-		currentView:   viewLogin,
+		currentView:   viewConnecting,
+		spinner:       s,
 		usernameInput: username,
 		passwordInput: password,
 		serverInput:   server,
@@ -148,7 +158,7 @@ func initialModel() model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, checkAuth)
+	return tea.Batch(m.spinner.Tick, checkAuth)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -180,8 +190,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyEnter:
 			if m.currentView == viewLogin {
-				return m, login(m)
-			} else {
+				m.currentView = viewConnecting
+				return m, tea.Batch(m.spinner.Tick, login(m))
+			} else if m.currentView == viewChat {
 				userInput := m.chatInput.Value()
 				m.chatInput.Reset()
 
@@ -257,9 +268,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Use username/password for authentication
 				return m, login(m)
 			}
+		} else {
+			m.currentView = viewLogin
+			return m, nil
 		}
 
 	case loginSuccessMsg:
+		m.err = nil
 		m.currentView = viewChat
 		m.chatInput.Focus()
 		m.serverURL = m.serverInput.Value()
@@ -312,24 +327,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errorMsg:
 		m.err = msg
+		if m.currentView == viewConnecting {
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				time.Sleep(5 * time.Second)
+				return checkAuth()
+			})
+		}
 		return m, nil
 	}
 
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
-	if m.currentView == viewLogin {
+
+	switch m.currentView {
+	case viewConnecting:
+		m.spinner, cmd = m.spinner.Update(msg)
+		cmds = append(cmds, cmd)
+	case viewLogin:
 		m.usernameInput, cmd = m.usernameInput.Update(msg)
 		cmds = append(cmds, cmd)
 		m.passwordInput, cmd = m.passwordInput.Update(msg)
 		cmds = append(cmds, cmd)
 		m.serverInput, cmd = m.serverInput.Update(msg)
 		cmds = append(cmds, cmd)
-	} else {
+	case viewChat:
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
 		m.chatInput, cmd = m.chatInput.Update(msg)
 		cmds = append(cmds, cmd)
 	}
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -395,8 +422,19 @@ func (m model) renderMessages() string {
 }
 
 func (m model) View() string {
-	if m.err != nil {
+	if m.err != nil && m.currentView != viewConnecting {
 		return fmt.Sprintf("\nError: %v\n\nPress any key to quit.", m.err)
+	}
+
+	if m.currentView == viewConnecting {
+		var s strings.Builder
+		s.WriteString(m.spinner.View())
+		s.WriteString(" Connecting to server...")
+		if m.err != nil {
+            s.WriteString("\n\nConnection failed. Retrying...")
+        }
+		ui := styleLoginBox.Render(s.String())
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, ui)
 	}
 
 	if m.currentView == viewLogin {
