@@ -731,7 +731,6 @@ func sendMessage(m model, userInput string) tea.Cmd {
 
 		postBody, _ := json.Marshal(map[string]interface{}{
 			"request":     userInput,
-			"lang":        "fr",
 			"tts":         true,
 			"client_type": "tui",
 		})
