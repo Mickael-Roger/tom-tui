@@ -56,6 +56,7 @@ type (
 	disconnectMsg     struct{}
 	autoLoginMsg      struct{ username, password, serverURL, sessionCookie string; useSession bool }
 	notifMsg          string
+	statusMsg         string
 	serverResponseMsg string
 	errorMsg          struct{ error }
 	serverResponse    struct {
@@ -69,8 +70,15 @@ type (
 		Module string `json:"module"`
 		Status string `json:"status"`
 	}
+	statusResponse struct {
+		Modules []moduleStatus `json:"modules"`
+	}
+	moduleStatus struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
 	credentials struct {
-		Username      string `json:"username"`	
+		Username      string `json:"username"`
 		Password      string `json:"password"`
 		ServerURL     string `json:"server_url"`
 		SessionCookie string `json:"session_cookie"`
@@ -189,10 +197,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
 		case tea.KeyEnter:
-			if m.currentView == viewLogin {
-				m.currentView = viewConnecting
-				return m, tea.Batch(m.spinner.Tick, login(m))
-			} else if m.currentView == viewChat {
+							if m.currentView == viewLogin {
+					m.currentView = viewConnecting
+					m.serverInput.SetValue(strings.TrimSuffix(m.serverInput.Value(), "/"))
+					return m, tea.Batch(m.spinner.Tick, login(m))
+				} else if m.currentView == viewChat {
 				userInput := m.chatInput.Value()
 				m.chatInput.Reset()
 
@@ -315,6 +324,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.renderMessages())
 		return m, nil
 
+	case statusMsg:
+		m.messages = append(m.messages, "Tom: # Modules Status\n"+string(msg))
+		m.viewport.SetContent(m.renderMessages())
+		m.viewport.GotoBottom()
+		return m, nil
+
 	case notifMsg:
 		if string(msg) == "" {
 			m.messages = append(m.messages, "Tom: No new notifications.")
@@ -371,10 +386,12 @@ func (m *model) handleCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "/disconnect":
 		return m, disconnect
 	case "/help":
-		m.messages = append(m.messages, "Available commands: /quit, /reset, /notif, /disconnect, /help")
+		m.messages = append(m.messages, "Available commands: /quit, /reset, /notif, /disconnect, /help, /status")
 		m.viewport.SetContent(m.renderMessages())
 		m.viewport.GotoBottom()
 		return m, nil
+	case "/status":
+		return m, fetchStatusCmd(*m)
 	default:
 		m.messages = append(m.messages, fmt.Sprintf("Unknown command: %s", cmd))
 		m.viewport.SetContent(m.renderMessages())
@@ -463,7 +480,7 @@ func (m model) footerView() string {
 }
 
 func (m model) commandBarView() string {
-	return styleCommandBar.Copy().Width(m.width).Render("Commands: /quit, /reset, /notif, /disconnect, /help")
+	return styleCommandBar.Copy().Width(m.width).Render("Commands: /quit, /reset, /notif, /disconnect, /help, /status")
 }
 
 func getAuthFilePath() (string, error) {
@@ -838,6 +855,42 @@ func fetchNotifsCmd(m model) tea.Cmd {
         }
 
         return notifMsg(strings.Join(notifs, "\n"))
+	}
+}
+
+func fetchStatusCmd(m model) tea.Cmd {
+	return func() tea.Msg {
+		req, err := http.NewRequest("GET", m.serverURL+"/status", nil)
+		if err != nil {
+			return errorMsg{err}
+		}
+
+		resp, err := m.client.Do(req)
+		if err != nil {
+			return errorMsg{err}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return errorMsg{fmt.Errorf("failed to fetch status: %s", resp.Status)}
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return errorMsg{err}
+		}
+
+		var statusData statusResponse
+		if err := json.Unmarshal(body, &statusData); err != nil {
+			return errorMsg{err}
+		}
+
+		var statuses []string
+		for _, mod := range statusData.Modules {
+			statuses = append(statuses, fmt.Sprintf("- **%s**: %s", mod.Name, mod.Status))
+		}
+
+		return statusMsg(strings.Join(statuses, "\n"))
 	}
 }
 
